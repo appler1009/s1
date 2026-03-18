@@ -117,7 +117,7 @@ export async function ensureDataset(
   const split       = preferredSplit ?? DATASET_DEFAULT_SPLIT[dataset] ?? 'test';
 
   // ── Serve from cache ───────────────────────────────────────────────────────
-  if (await pathExists(corpusPath)) {
+  if (await pathExists(corpusPath) && await pathExists(queriesPath)) {
     const found = await findQrelsPath(datasetDir, split);
     if (found) {
       console.log(`  Dataset cached: ${datasetDir}`);
