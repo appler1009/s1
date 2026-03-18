@@ -40,6 +40,7 @@ export class LuceneQueryParser {
     while (!this.eof()) {
       this.skipWs();
       if (this.eof()) break;
+      if (this.ch() === ')') break; // group terminator — let parseGroup consume it
 
       // Detect explicit OR connector (between two equal-priority terms)
       if (this.peek(2) === 'OR' && this.isWordBoundaryAt(this.pos + 2)) {
