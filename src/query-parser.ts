@@ -87,7 +87,7 @@ export class LuceneQueryParser {
     }
 
     if (clauses.length === 0) return { type: 'term', term: '' };
-    if (clauses.length === 1) return clauses[0]!.node;
+    if (clauses.length === 1 && clauses[0]!.occur === 'should') return clauses[0]!.node;
 
     const must: QueryAST[] = [];
     const should: QueryAST[] = [];
