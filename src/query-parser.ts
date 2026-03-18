@@ -277,10 +277,12 @@ export class LuceneQueryParser {
   /** Try to consume ^N.N or ^N; returns the boost number or undefined. */
   private parseBoost(): number | undefined {
     if (this.ch() !== '^') return undefined;
+    const saved = this.pos;
     this.pos++;
     const raw = this.readToken();
     const val = parseFloat(raw);
-    return isNaN(val) ? undefined : val;
+    if (isNaN(val)) { this.pos = saved; return undefined; } // restore if not numeric
+    return val;
   }
 
   private skipWs(): void {
