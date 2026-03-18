@@ -4,6 +4,15 @@ import path from 'node:path';
 // ─── Interface ───────────────────────────────────────────────────────────────
 
 export interface IndexDirectory {
+  /**
+   * List entries whose path starts with `prefix`.
+   *
+   * MemoryIndexDirectory and S3IndexDirectory treat `prefix` as a plain
+   * string key prefix.  FsIndexDirectory treats it as a directory path and
+   * calls `readdir()` on that directory — it does NOT do recursive glob
+   * matching.  Callers should use trailing-slash prefixes like
+   * `"seg-000001/"` which work equivalently in all three backends.
+   */
   list(prefix: string): Promise<string[]>;
   readJson<T>(filePath: string): Promise<T>;
   writeJson(filePath: string, data: unknown, options?: { atomic?: boolean }): Promise<void>;
