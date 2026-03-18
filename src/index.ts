@@ -45,6 +45,7 @@ import { IndexSearcher } from './searcher.js';
 export interface IndexOptions {
   commitThreshold?: number;
   postingsCacheSize?: number;
+  termDictCacheSize?: number;
 }
 
 /**
@@ -81,6 +82,7 @@ export function createIndex(
     writer:   new IndexWriter(directory, config, options?.commitThreshold),
     searcher: new IndexSearcher(directory, config, scorer, {
       postingsCacheSize: options?.postingsCacheSize,
+      termDictCacheSize: options?.termDictCacheSize,
     }),
   };
 }
