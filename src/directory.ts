@@ -88,7 +88,7 @@ export class FsIndexDirectory implements IndexDirectory {
     const abs = this.resolve(filePath);
     await fs.mkdir(path.dirname(abs), { recursive: true });
 
-    const json = JSON.stringify(data, null, 2);
+    const json = JSON.stringify(data);
 
     if (options?.atomic) {
       const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;

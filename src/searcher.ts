@@ -18,7 +18,7 @@ import { LuceneQueryParser } from './query-parser.js';
 export class IndexSearcher {
   private readonly parser = new LuceneQueryParser();
   private readonly termDictCache:    LRUCache<string, Record<string, string>>;
-  private readonly postingsCache:    LRUCache<string, PostingsList>;
+  private readonly postingsCache:    LRUCache<string, Record<string, PostingsList>>;
   private readonly fieldLenCache:    LRUCache<string, Record<string, Record<string, number>>>;
 
   constructor(
@@ -290,19 +290,22 @@ export class IndexSearcher {
   }
 
   private async loadPostings(segId: string, fieldTerm: string): Promise<PostingsList | null> {
-    const key = `${segId}::${fieldTerm}`;
-    const cached = this.postingsCache.get(key);
-    if (cached) return cached;
-    try {
-      const termDict = await this.loadTermDict(segId);
-      const filename = termDict[fieldTerm];
-      if (!filename) return null;
-      const pl = await this.directory.readJson<PostingsList>(`${segId}/${filename}`);
-      this.postingsCache.set(key, pl);
-      return pl;
-    } catch {
-      return null;
+    const termDict = await this.loadTermDict(segId);
+    const filename = termDict[fieldTerm];
+    if (!filename) return null;
+
+    // Cache by bucket file: one cache entry serves all terms in the same bucket.
+    const bucketKey = `${segId}::${filename}`;
+    let bucket = this.postingsCache.get(bucketKey);
+    if (!bucket) {
+      try {
+        bucket = await this.directory.readJson<Record<string, PostingsList>>(`${segId}/${filename}`);
+        this.postingsCache.set(bucketKey, bucket);
+      } catch {
+        return null;
+      }
     }
+    return bucket[fieldTerm] ?? null;
   }
 
   private async loadFieldLengths(

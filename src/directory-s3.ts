@@ -75,7 +75,7 @@ export class S3IndexDirectory implements IndexDirectory {
     _options?: { atomic?: boolean },
   ): Promise<void> {
     const { PutObjectCommand } = await import('@aws-sdk/client-s3' as string as any);
-    const body = JSON.stringify(data, null, 2);
+    const body = JSON.stringify(data);
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,

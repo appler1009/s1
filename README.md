@@ -139,19 +139,21 @@ Each `commit()` produces a new segment directory:
 
 ```
 index/
-├── segments.json              ← manifest listing all segment IDs
+├── segments.json               ← manifest listing all segment IDs
 ├── seg-000001/
-│   ├── segment-meta.json      ← docCount, per-field avgLength, timestamp
-│   ├── docs.json              ← stored fields keyed by numeric docId
-│   ├── field-lengths.json     ← per-doc token counts for BM25 |d| normalisation
-│   ├── term-dict.json         ← "field:term" → "postings/field__term.json" (term part hex-escaped)
-│   ├── deleted.json           ← tombstoned string doc IDs
+│   ├── segment-meta.json       ← docCount, per-field avgLength, timestamp
+│   ├── docs.json               ← stored fields keyed by numeric docId
+│   ├── field-lengths.json      ← per-doc token counts for BM25 |d| normalisation
+│   ├── term-dict.json          ← "field:term" → "postings/bucket-NN.json"
+│   ├── deleted.json            ← tombstoned string doc IDs
 │   └── postings/
-│       ├── title__hello.json  ← { df, postings: [{docId, tf, pos}] }
-│       └── ...
+│       ├── bucket-00.json      ← { "field:term": { df, postings: [{docId, tf, pos}] }, … }
+│       └── …  (up to 64 bucket files)
 └── seg-000002/
     └── ...
 ```
+
+Postings are grouped into bucket files using a FNV-1a hash of the `field:term` key. The number of buckets scales with the segment's document count — `ceil(docCount / 1000)` — so each bucket covers roughly 1 000 documents' worth of postings regardless of corpus size (5 buckets for a 5 000-doc segment, 5 200 buckets for a fully merged 5.2 M-doc index). This reduces file count from O(unique terms) to O(docCount / 1 000), which matters for S3 (fewer `ListObjects`/`GetObject` calls during merges) and local filesystems (fewer inodes, faster directory traversal).
 
 ## IndexSearcher
 
@@ -319,6 +321,12 @@ bun bench/beir.ts --dataset hotpotqa --no-merge --top-k 10 --quiet
 | `--quiet` | false | No progress bars; print summary only |
 
 Datasets are downloaded from the [UKP TU Darmstadt public server](https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/) and cached in `bench/data/` — subsequent runs skip the download.
+
+> **Re-indexing:** The benchmark does not clear an existing index before running. Re-running with the same `--index-dir` will append a second copy of the corpus, producing duplicate results. Delete the index directory first for a clean run:
+> ```sh
+> rm -rf bench/index-hotpotqa
+> bun bench/beir.ts --dataset hotpotqa
+> ```
 
 ## Development
 

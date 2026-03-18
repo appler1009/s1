@@ -1,6 +1,7 @@
 import type { IndexDirectory } from './directory.js';
 import type { IndexConfig, Posting, PostingsList, SegmentMeta, SegmentInfo, FieldStats } from './types.js';
 import { createAnalyzer } from './analyzer.js';
+import { bucketFor, bucketFilename, numBucketsFor } from './postings-bucket.js';
 
 export class IndexWriter {
   private nextDocId = 0;
@@ -124,13 +125,27 @@ export class IndexWriter {
     }
 
     // 4. Per-term postings (flatten Map<docId,Posting> → sorted array) + term-dict
+    //
+    // Terms are grouped into POSTINGS_BUCKETS bucket files so that a segment
+    // with tens of thousands of unique terms produces only ~64 files instead
+    // of one file per term.  Each bucket file is a JSON object keyed by
+    // "field:term".  The bucket assignment is deterministic (FNV-1a hash), so
+    // readers can recompute it from the term key without consulting any extra
+    // metadata.
+    const numBuckets = numBucketsFor(this.stagingDocs.size);
+    const buckets = new Map<number, Record<string, PostingsList>>();
     const termDict: Record<string, string> = {};
+
     for (const [fieldTerm, docMap] of this.stagingPostings) {
       const postings = Array.from(docMap.values()).sort((a, b) => a.docId - b.docId);
-      const filename = `postings/${sanitize(fieldTerm)}.json`;
-      await this.directory.writeJson(`${segmentId}/${filename}`,
-        { df: postings.length, postings } satisfies PostingsList);
-      termDict[fieldTerm] = filename;
+      const bucket = bucketFor(fieldTerm, numBuckets);
+      if (!buckets.has(bucket)) buckets.set(bucket, {});
+      buckets.get(bucket)![fieldTerm] = { df: postings.length, postings } satisfies PostingsList;
+      termDict[fieldTerm] = bucketFilename(bucket);
+    }
+
+    for (const [bucket, data] of buckets) {
+      await this.directory.writeJson(`${segmentId}/${bucketFilename(bucket)}`, data);
     }
     await this.directory.writeJson(`${segmentId}/term-dict.json`, termDict);
 
@@ -182,19 +197,3 @@ async function readSegmentsList(dir: IndexDirectory): Promise<string[]> {
   }
 }
 
-/**
- * Convert "field:term" to a safe, collision-free filename.
- *
- * Field and term are encoded separately and joined by "__".
- * Non-alphanumeric characters in the term are hex-escaped (xNN) so that
- * distinct terms like "hello-world" (x2d) and "hello_world" (x5f) never
- * map to the same filename.  Field names use simple underscore replacement
- * because they are always standard identifier-like strings.
- */
-export function sanitize(fieldTerm: string): string {
-  const sep  = fieldTerm.indexOf(':');
-  const field = fieldTerm.slice(0, sep).toLowerCase().replace(/[^a-z0-9]/g, '_');
-  const term  = fieldTerm.slice(sep + 1).toLowerCase()
-    .replace(/[^a-z0-9]/g, c => `x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
-  return `${field}__${term}`;
-}

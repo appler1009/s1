@@ -1,6 +1,6 @@
 import type { IndexDirectory } from './directory.js';
 import type { Posting, PostingsList, SegmentMeta, FieldStats } from './types.js';
-import { sanitize } from './writer.js';
+import { bucketFor, bucketFilename, numBucketsFor } from './postings-bucket.js';
 
 export interface MergePolicy {
   maxSegments: number;
@@ -158,44 +158,62 @@ export class SegmentMerger {
     await this.directory.writeJson(`${newSegId}/field-lengths.json`, mergedFieldLengths);
 
     // ── 5. Merge postings ────────────────────────────────────────────────────
+    //
+    // Process source segments bucket-by-bucket so each source bucket file is
+    // read exactly once.  The merged postings are accumulated per field:term,
+    // then written out into new bucket files for the output segment.
 
-    const allFieldTerms = new Set<string>();
-    for (const seg of segments) {
-      for (const ft of Object.keys(seg.termDict)) allFieldTerms.add(ft);
-    }
+    // fieldTerm → merged postings (accumulated across all source segments)
+    const mergedByTerm = new Map<string, Posting[]>();
 
-    const newTermDict: Record<string, string> = {};
+    for (let si = 0; si < segments.length; si++) {
+      const seg     = segments[si]!;
+      const mapping = docMappings[si]!;
 
-    for (const fieldTerm of allFieldTerms) {
-      const mergedPostings: Posting[] = [];
-
-      for (let si = 0; si < segments.length; si++) {
-        const seg      = segments[si]!;
-        const mapping  = docMappings[si]!;
-        const filename = seg.termDict[fieldTerm];
-        if (!filename) continue;
-
-        try {
-          const pl = await this.directory.readJson<PostingsList>(`${seg.id}/${filename}`);
-          for (const p of pl.postings) {
-            const newId = mapping.get(p.docId);
-            if (newId !== undefined) {
-              mergedPostings.push({ docId: newId, tf: p.tf, pos: p.pos });
-            }
-          }
-        } catch { /* missing postings file — skip */ }
+      // Group terms by their source bucket filename to load each file once.
+      const termsByFile = new Map<string, string[]>();
+      for (const [ft, filename] of Object.entries(seg.termDict)) {
+        if (!termsByFile.has(filename)) termsByFile.set(filename, []);
+        termsByFile.get(filename)!.push(ft);
       }
 
-      if (mergedPostings.length === 0) continue;
+      for (const [filename, terms] of termsByFile) {
+        let bucketData: Record<string, PostingsList>;
+        try {
+          bucketData = await this.directory.readJson<Record<string, PostingsList>>(
+            `${seg.id}/${filename}`,
+          );
+        } catch { continue; /* missing bucket file — skip */ }
 
-      const filename = `postings/${sanitize(fieldTerm)}.json`;
-      await this.directory.writeJson(`${newSegId}/${filename}`, {
-        df: mergedPostings.length,
-        postings: mergedPostings,
-      } satisfies PostingsList);
-      newTermDict[fieldTerm] = filename;
+        for (const fieldTerm of terms) {
+          const pl = bucketData[fieldTerm];
+          if (!pl) continue;
+          if (!mergedByTerm.has(fieldTerm)) mergedByTerm.set(fieldTerm, []);
+          const out = mergedByTerm.get(fieldTerm)!;
+          for (const p of pl.postings) {
+            const newId = mapping.get(p.docId);
+            if (newId !== undefined) out.push({ docId: newId, tf: p.tf, pos: p.pos });
+          }
+        }
+      }
     }
 
+    // Write output bucket files and term-dict.
+    const numBuckets = numBucketsFor(totalDocCount);
+    const newBuckets = new Map<number, Record<string, PostingsList>>();
+    const newTermDict: Record<string, string> = {};
+
+    for (const [fieldTerm, postings] of mergedByTerm) {
+      if (postings.length === 0) continue;
+      const bucket = bucketFor(fieldTerm, numBuckets);
+      if (!newBuckets.has(bucket)) newBuckets.set(bucket, {});
+      newBuckets.get(bucket)![fieldTerm] = { df: postings.length, postings } satisfies PostingsList;
+      newTermDict[fieldTerm] = bucketFilename(bucket);
+    }
+
+    for (const [bucket, data] of newBuckets) {
+      await this.directory.writeJson(`${newSegId}/${bucketFilename(bucket)}`, data);
+    }
     await this.directory.writeJson(`${newSegId}/term-dict.json`, newTermDict);
 
     // ── 6. Write segment-meta.json (derived from merged field-lengths) ───────
