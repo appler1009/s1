@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { bucketFor, bucketFilename, numBucketsFor, DOCS_PER_BUCKET } from '../postings-bucket.js';
+import { bucketFor, bucketFilename, numBucketsFor, DOCS_PER_BUCKET, MIN_BUCKETS } from '../postings-bucket.js';
 import { MemoryIndexDirectory } from '../directory.js';
 import { createIndex } from '../index.js';
 import { SegmentMerger } from '../merge.js';
@@ -7,15 +7,15 @@ import { SegmentMerger } from '../merge.js';
 // ─── Unit: numBucketsFor ──────────────────────────────────────────────────────
 
 describe('numBucketsFor', () => {
-  it('returns 1 for zero or very small doc counts', () => {
-    expect(numBucketsFor(0)).toBe(1);
-    expect(numBucketsFor(1)).toBe(1);
-    expect(numBucketsFor(DOCS_PER_BUCKET)).toBe(1);
+  it('returns MIN_BUCKETS for small doc counts', () => {
+    expect(numBucketsFor(0)).toBe(MIN_BUCKETS);
+    expect(numBucketsFor(1)).toBe(MIN_BUCKETS);
+    expect(numBucketsFor(5_000)).toBe(MIN_BUCKETS);
+    expect(numBucketsFor(MIN_BUCKETS * DOCS_PER_BUCKET)).toBe(MIN_BUCKETS);
   });
 
-  it('scales proportionally to doc count', () => {
-    expect(numBucketsFor(DOCS_PER_BUCKET + 1)).toBe(2);
-    expect(numBucketsFor(5_000)).toBe(5);
+  it('scales above MIN_BUCKETS once docCount exceeds the threshold', () => {
+    expect(numBucketsFor(MIN_BUCKETS * DOCS_PER_BUCKET + 1)).toBe(MIN_BUCKETS + 1);
     expect(numBucketsFor(5_200_000)).toBe(5_200);
   });
 });

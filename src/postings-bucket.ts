@@ -22,9 +22,16 @@
 /** Target number of documents per bucket file. */
 export const DOCS_PER_BUCKET = 1_000;
 
+/**
+ * Minimum bucket count, chosen so that small segments (e.g. the default
+ * 5 000-doc commit threshold) keep each bucket file to a manageable size
+ * (~640 terms) for lazy postings loading during search.
+ */
+export const MIN_BUCKETS = 64;
+
 /** Compute the number of buckets for a segment with the given document count. */
 export function numBucketsFor(docCount: number): number {
-  return Math.max(1, Math.ceil(docCount / DOCS_PER_BUCKET));
+  return Math.max(MIN_BUCKETS, Math.ceil(docCount / DOCS_PER_BUCKET));
 }
 
 /**
