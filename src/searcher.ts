@@ -160,7 +160,7 @@ export class IndexSearcher {
    */
   private queryMatches(query: QueryAST, docId: number, pm: Map<string, PostingsList>): boolean {
     switch (query.type) {
-      case 'phrase': return checkPhraseMatch(query, docId, pm);
+      case 'phrase': return checkPhraseMatch(query, docId, pm, this.config);
       case 'bool':   return this.boolMatchesSatisfied(query, docId, pm);
       default:       return true;
     }
@@ -205,7 +205,7 @@ export class IndexSearcher {
         return false;
       }
       case 'phrase':
-        return checkPhraseMatch(node, docId, pm);
+        return checkPhraseMatch(node, docId, pm, this.config);
       case 'wildcard': {
         const regex = wildcardToRegex(node.pattern);
         for (const [key, pl] of pm) {
@@ -334,50 +334,92 @@ export class IndexSearcher {
 
 // ─── Phrase position checking ─────────────────────────────────────────────────
 
+/**
+ * Analyze raw phrase query tokens and return the indexable terms together
+ * with their absolute phrase-position offsets.
+ *
+ * Each raw query token occupies at least one position (mirroring what the
+ * indexer does), so stop words create gaps without yielding a term:
+ *
+ *   "the quick brown"  →  [{quick, 2}, {brown, 3}]   ("the" = pos 1, filtered)
+ *   "quick the brown"  →  [{quick, 1}, {brown, 3}]   ("the" = pos 2, filtered)
+ *   "full-text search" →  [{full, 1}, {text, 2}, {search, 3}]  (split by standard analyzer)
+ */
+function analyzePhraseQuery(
+  rawTerms: string[],
+  field: string,
+  config: IndexConfig,
+): Array<{ term: string; phrasePos: number }> {
+  const analyzer = createAnalyzer(config.analyzers?.[field] ?? 'standard');
+  const result: Array<{ term: string; phrasePos: number }> = [];
+  let phraseOffset = 0;
+  for (const raw of rawTerms) {
+    const tokens = analyzer.analyze(field, raw);
+    if (tokens.length === 0) {
+      phraseOffset++; // stop word — occupies a position but yields no term
+    } else {
+      for (const tok of tokens) {
+        result.push({ term: tok.term, phrasePos: phraseOffset + tok.position });
+      }
+      phraseOffset += tokens[tokens.length - 1]!.position;
+    }
+  }
+  return result;
+}
+
 function checkPhraseMatch(
   node: PhraseQuery,
   docId: number,
   pm: Map<string, PostingsList>,
+  config: IndexConfig,
 ): boolean {
   if (node.terms.length === 0) return true;
   const slop = node.slop ?? 0;
 
   if (node.field) {
-    return checkPhrasePositions(node.terms, node.field, docId, pm, slop);
+    return checkPhrasePositions(node.terms, node.field, docId, pm, slop, config);
   }
 
   // Unfielded: try each distinct field present in postingsMap
   const fields = new Set<string>();
   for (const key of pm.keys()) fields.add(key.slice(0, key.indexOf(':')));
   for (const field of fields) {
-    if (checkPhrasePositions(node.terms, field, docId, pm, slop)) return true;
+    if (checkPhrasePositions(node.terms, field, docId, pm, slop, config)) return true;
   }
   return false;
 }
 
 function checkPhrasePositions(
-  terms: string[],
+  rawTerms: string[],
   field: string,
   docId: number,
   pm: Map<string, PostingsList>,
   slop: number,
+  config: IndexConfig,
 ): boolean {
-  // Collect position arrays for each term; bail if any term is missing
-  const posArrays: number[][] = [];
-  for (const t of terms) {
-    const pl = pm.get(`${field}:${t}`);
+  const analyzed = analyzePhraseQuery(rawTerms, field, config);
+  if (analyzed.length === 0) return true; // all stop words — vacuously match
+
+  // Collect document-position arrays for each analyzed term
+  const termPosData: Array<{ phrasePos: number; docPositions: number[] }> = [];
+  for (const { term, phrasePos } of analyzed) {
+    const pl = pm.get(`${field}:${term}`);
     if (!pl) return false;
     const posting = binarySearchPosting(pl.postings, docId);
     if (!posting) return false;
-    posArrays.push(posting.pos);
+    termPosData.push({ phrasePos, docPositions: posting.pos });
   }
 
-  // For each candidate start position of term[0], verify subsequent terms
-  // appear at expected offsets (position[i] ≈ startPos + i, within slop)
-  outer: for (const startPos of posArrays[0]!) {
-    for (let i = 1; i < terms.length; i++) {
-      const expected = startPos + i;
-      if (!posArrays[i]!.some(p => Math.abs(p - expected) <= slop)) continue outer;
+  // For each candidate anchor position (where the first analyzed term appears),
+  // verify the remaining terms appear at their expected relative offsets (±slop).
+  const firstPhrasePos = analyzed[0]!.phrasePos;
+  outer: for (const startDocPos of termPosData[0]!.docPositions) {
+    for (let i = 1; i < termPosData.length; i++) {
+      const posOffset = analyzed[i]!.phrasePos - firstPhrasePos;
+      const expected  = startDocPos + posOffset;
+      if (!termPosData[i]!.docPositions.some(p => Math.abs(p - expected) <= slop)) {
+        continue outer;
+      }
     }
     return true;
   }
@@ -409,8 +451,11 @@ function extractTerms(
       }
       case 'phrase': {
         const fields = n.field ? [n.field] : indexedFields;
-        for (const field of fields)
-          for (const t of n.terms) out.push({ field, term: t.toLowerCase() });
+        for (const field of fields) {
+          for (const { term } of analyzePhraseQuery(n.terms, field, config)) {
+            out.push({ field, term });
+          }
+        }
         break;
       }
       case 'bool':
