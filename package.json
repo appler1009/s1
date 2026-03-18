@@ -1,0 +1,29 @@
+{
+  "name": "lucene-ts",
+  "version": "0.1.0",
+  "description": "Lucene-inspired full-text search engine in TypeScript, S3-native",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test src/tests",
+    "test:watch": "bun test --watch src/tests",
+    "bench": "bun src/bench/bench.ts"
+  },
+  "keywords": ["search", "lucene", "s3", "fulltext", "inverted-index"],
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "lru-cache": "^11.2.7"
+  }
+}
