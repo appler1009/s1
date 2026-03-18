@@ -56,8 +56,18 @@ export class IndexSearcher {
     const segments = await this.loadSegments();
     if (segments.length === 0) return [];
 
+    // Collect tombstones from ALL segments so a deletion committed to one
+    // segment also excludes matching docs in other segments.
+    const globalDeleted = new Set<string>();
+    await Promise.all(
+      segments.map(async meta => {
+        const dels = await this.loadDeletedSet(meta.segmentId);
+        for (const id of dels) globalDeleted.add(id);
+      }),
+    );
+
     const perSegment = await Promise.all(
-      segments.map(meta => this.searchSegment(meta, queryAST)),
+      segments.map(meta => this.searchSegment(meta, queryAST, globalDeleted)),
     );
 
     return selectTopK(perSegment.flat().filter(r => !filter || filter(r.doc)), topK);
@@ -74,13 +84,13 @@ export class IndexSearcher {
   private async searchSegment(
     segMeta: SegmentMeta,
     queryAST: QueryAST,
+    deletedIds: Set<string>,
   ): Promise<SearchResult[]> {
     const segId = segMeta.segmentId;
     const indexedFields = Object.keys(segMeta.fields);
 
-    const [docs, deletedIds, allFieldLengths] = await Promise.all([
+    const [docs, allFieldLengths] = await Promise.all([
       this.directory.readJson<Record<string, Record<string, unknown>>>(`${segId}/docs.json`),
-      this.loadDeletedSet(segId),
       this.loadFieldLengths(segId),
     ]);
 
