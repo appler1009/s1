@@ -275,6 +275,51 @@ writer-shard-{0..N}  →  S3 shard-{0..N}/
                     fan-out → [shard searchers] → merge top-K
 ```
 
+## BeIR benchmark
+
+Evaluates retrieval quality against [BeIR](https://github.com/beir-cellar/beir) datasets (MSMARCO, HotpotQA, and others) and reports standard IR metrics: NDCG@10/100, MAP@100, Recall@10/100, MRR@10.
+
+**Requirements:** `curl` and `unzip` must be in PATH. For the S3 backend, `@aws-sdk/client-s3` must be installed as a peer dependency.
+
+```sh
+# Filesystem backend (default) — downloads ~1.7 GB, indexes to bench/index-hotpotqa/
+bun bench/beir.ts --dataset hotpotqa
+
+# In-memory subset — fast, no disk I/O
+bun bench/beir.ts --dataset hotpotqa --backend memory --max-docs 50000
+
+# Small dataset (3 633 docs) — completes in seconds, good for a quick smoke test
+bun bench/beir.ts --dataset nfcorpus
+
+# MSMARCO on a custom index path
+bun bench/beir.ts --dataset msmarco --backend fs --index-dir /tmp/msmarco-idx
+
+# S3 backend (requires bun add @aws-sdk/client-s3)
+bun bench/beir.ts --dataset hotpotqa --backend s3 --s3-bucket my-bucket
+
+# Skip segment merge, limit retrieval depth, silence progress bars
+bun bench/beir.ts --dataset hotpotqa --no-merge --top-k 10 --quiet
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--dataset <name>` | — | BeIR dataset: `hotpotqa`, `msmarco`, `nfcorpus`, `fiqa`, `arguana`, `scifact`, `nq`, `quora`, … |
+| `--backend <name>` | `fs` | Storage backend: `memory`, `fs`, `s3` |
+| `--data-dir <path>` | `bench/data` | Dataset download cache |
+| `--index-dir <path>` | `bench/index-<dataset>` | Index directory (fs backend) |
+| `--s3-bucket <name>` | — | S3 bucket (s3 backend, required) |
+| `--s3-prefix <pfx>` | `beir/<dataset>` | S3 key prefix |
+| `--s3-region <r>` | `us-east-1` | AWS region |
+| `--s3-endpoint <url>` | — | Custom endpoint (LocalStack / MinIO) |
+| `--max-docs <n>` | 0 (unlimited) | Cap corpus size; defaults to 100 000 for the memory backend |
+| `--commit-every <n>` | 5 000 | Writer auto-commit threshold |
+| `--top-k <n>` | 100 | Retrieval depth per query (min 100 for full metrics) |
+| `--split <name>` | auto | Qrel split: `test`, `dev`, `train` (MSMARCO defaults to `dev`) |
+| `--no-merge` | false | Skip `SegmentMerger.mergeAll()` after indexing |
+| `--quiet` | false | No progress bars; print summary only |
+
+Datasets are downloaded from the [UKP TU Darmstadt public server](https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/) and cached in `bench/data/` — subsequent runs skip the download.
+
 ## Development
 
 ```sh
@@ -282,7 +327,7 @@ bun install
 bun test                          # bun:test
 bun test --watch src/tests
 bun run build                     # tsc → dist/
-bun run bench                     # 10K doc benchmark
+bun run bench                     # 10K synthetic doc microbenchmark
 
 DOCS=50000 QUERIES=500 bun run bench
 ```
