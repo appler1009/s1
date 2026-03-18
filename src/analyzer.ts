@@ -15,7 +15,7 @@ const STOP_WORDS = new Set([
   'will', 'would', 'could', 'should', 'may', 'might', 'shall', 'can',
   'not', 'no', 'nor', 'so', 'yet', 'both', 'either', 'neither',
   'if', 'then', 'else', 'when', 'where', 'while', 'although', 'though',
-  'because', 'since', 'until', 'unless', 'although',
+  'because', 'since', 'until', 'unless',
 ]);
 
 /**
