@@ -162,8 +162,10 @@ export class LuceneQueryParser {
     // Check for quoted phrase (no field prefix)
     if (this.ch() === '"') {
       const phrase = this.readPhrase();
+      const slop  = this.parseSlop();
       const boost = this.parseBoost();
       const pq: PhraseQuery = { type: 'phrase', terms: phrase };
+      if (slop  !== undefined) pq.slop  = slop;
       if (boost !== undefined) pq.boost = boost;
       return pq;
     }
@@ -182,8 +184,10 @@ export class LuceneQueryParser {
 
       if (this.ch() === '"') {
         const terms = this.readPhrase();
+        const slop  = this.parseSlop();
         const boost = this.parseBoost();
         const pq: PhraseQuery = { type: 'phrase', field, terms };
+        if (slop  !== undefined) pq.slop  = slop;
         if (boost !== undefined) pq.boost = boost;
         return pq;
       }
@@ -257,6 +261,17 @@ export class LuceneQueryParser {
       buf += this.input[this.pos++];
     }
     return buf.trim();
+  }
+
+  /** Try to consume ~N (phrase slop); returns the slop value or undefined. */
+  private parseSlop(): number | undefined {
+    if (this.ch() !== '~') return undefined;
+    const saved = this.pos;
+    this.pos++;
+    const raw = this.readToken();
+    const val = parseInt(raw, 10);
+    if (isNaN(val)) { this.pos = saved; return undefined; }
+    return val;
   }
 
   /** Try to consume ^N.N or ^N; returns the boost number or undefined. */
