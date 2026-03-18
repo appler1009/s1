@@ -178,13 +178,18 @@ async function readSegmentsList(dir: IndexDirectory): Promise<string[]> {
 }
 
 /**
- * Convert "field:term" to a safe filename.
- * Encodes field and term separately, joined by "__", so "title:hello-world"
- * and "title:hello_world" produce different filenames and cannot collide.
+ * Convert "field:term" to a safe, collision-free filename.
+ *
+ * Field and term are encoded separately and joined by "__".
+ * Non-alphanumeric characters in the term are hex-escaped (xNN) so that
+ * distinct terms like "hello-world" (x2d) and "hello_world" (x5f) never
+ * map to the same filename.  Field names use simple underscore replacement
+ * because they are always standard identifier-like strings.
  */
 function sanitize(fieldTerm: string): string {
-  const sep = fieldTerm.indexOf(':');
-  const field = fieldTerm.slice(0, sep).replace(/[^a-z0-9]/gi, '_').toLowerCase();
-  const term  = fieldTerm.slice(sep + 1).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+  const sep  = fieldTerm.indexOf(':');
+  const field = fieldTerm.slice(0, sep).toLowerCase().replace(/[^a-z0-9]/g, '_');
+  const term  = fieldTerm.slice(sep + 1).toLowerCase()
+    .replace(/[^a-z0-9]/g, c => `x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
   return `${field}__${term}`;
 }
