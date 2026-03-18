@@ -4,6 +4,7 @@ import { createAnalyzer } from './analyzer.js';
 
 export class IndexWriter {
   private nextDocId = 0;
+  private closed    = false;
 
   private stagingDocs        = new Map<number, Record<string, unknown>>();
   // fieldTerm → docId → Posting: O(1) lookup during indexing
@@ -26,6 +27,7 @@ export class IndexWriter {
   // ─── Public API ──────────────────────────────────────────────────────────
 
   async addDocument(inputDoc: Record<string, unknown>): Promise<void> {
+    if (this.closed) throw new Error('IndexWriter has been closed');
     const docId = this.nextDocId++;
     const storedFields: Record<string, unknown> = {};
 
@@ -82,6 +84,7 @@ export class IndexWriter {
   }
 
   async commit(): Promise<SegmentInfo> {
+    if (this.closed) throw new Error('IndexWriter has been closed');
     if (this.stagingDocs.size === 0 && this.pendingDeletes.size === 0) {
       return { segmentId: '', docCount: 0, deletedCount: 0 };
     }
@@ -160,9 +163,11 @@ export class IndexWriter {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
     if (this.stagingDocs.size > 0 || this.pendingDeletes.size > 0) {
       await this.commit();
     }
+    this.closed = true;
   }
 }
 
