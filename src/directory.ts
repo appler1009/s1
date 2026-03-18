@@ -82,7 +82,7 @@ export class FsIndexDirectory implements IndexDirectory {
     const json = JSON.stringify(data, null, 2);
 
     if (options?.atomic) {
-      const tmp = `${abs}.${process.pid}.tmp`;
+      const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
       await fs.writeFile(tmp, json, 'utf-8');
       await fs.rename(tmp, abs);
     } else {
