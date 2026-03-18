@@ -191,7 +191,7 @@ async function readSegmentsList(dir: IndexDirectory): Promise<string[]> {
  * map to the same filename.  Field names use simple underscore replacement
  * because they are always standard identifier-like strings.
  */
-function sanitize(fieldTerm: string): string {
+export function sanitize(fieldTerm: string): string {
   const sep  = fieldTerm.indexOf(':');
   const field = fieldTerm.slice(0, sep).toLowerCase().replace(/[^a-z0-9]/g, '_');
   const term  = fieldTerm.slice(sep + 1).toLowerCase()
