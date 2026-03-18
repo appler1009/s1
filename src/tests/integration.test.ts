@@ -93,14 +93,40 @@ describe('noStore and noIndex behaviour', () => {
 // ─── Phrase queries ───────────────────────────────────────────────────────────
 
 describe('phrase queries', () => {
-  it('matches phrase', async () => {
+  it('matches exact phrase by position', async () => {
     const { writer, searcher } = makeIndex();
     await writer.addDocument({ id: '1', title: 'quick brown fox' });
-    await writer.addDocument({ id: '2', title: 'quick fox brown' });
+    await writer.addDocument({ id: '2', title: 'quick fox brown' }); // wrong order
     await writer.commit();
 
     const results = await searcher.search('"quick brown fox"');
-    expect(results.map(r => r.docId)).toContain('1');
+    const ids = results.map(r => r.docId);
+    expect(ids).toContain('1');
+    expect(ids).not.toContain('2'); // "quick fox brown" doesn't match the phrase order
+  });
+
+  it('matches phrase with slop', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: '1', title: 'quick brown fox' });
+    await writer.addDocument({ id: '2', title: 'quick very brown fox' }); // 1 word gap
+    await writer.commit();
+
+    // slop:1 should match both
+    const results = await searcher.search('"quick brown"~1');
+    const ids = results.map(r => r.docId);
+    expect(ids).toContain('1');
+    expect(ids).toContain('2');
+  });
+});
+
+// ─── Range queries ────────────────────────────────────────────────────────────
+
+describe('range queries', () => {
+  it('throws a helpful error', async () => {
+    const { searcher } = makeIndex();
+    await expect(searcher.search('[2020 TO 2024]')).rejects.toThrow(
+      'Range queries ([min TO max]) are not yet implemented',
+    );
   });
 });
 
