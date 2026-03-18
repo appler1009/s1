@@ -32,3 +32,5 @@ coverage/
 tmp/
 scratch/
 index-data/
+bench/data/
+bench/index-*/

@@ -14,7 +14,8 @@
     "build": "tsc",
     "test": "bun test src/tests",
     "test:watch": "bun test --watch src/tests",
-    "bench": "bun src/bench/bench.ts"
+    "bench": "bun src/bench/bench.ts",
+    "bench:beir": "bun bench/beir.ts"
   },
   "keywords": ["search", "lucene", "s3", "fulltext", "inverted-index"],
   "license": "MIT",

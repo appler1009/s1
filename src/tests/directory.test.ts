@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { MemoryIndexDirectory } from '../directory.js';
+import type { IndexDirectory } from '../directory.js';
 
 describe('MemoryIndexDirectory', () => {
   // ── writeJson / readJson ────────────────────────────────────────────────────
@@ -118,7 +119,10 @@ describe('MemoryIndexDirectory', () => {
   // ── writeJson options param is accepted (no-op for memory) ──────────────────
 
   it('writeJson with atomic option does not throw', async () => {
-    const dir = new MemoryIndexDirectory();
+    // Cast to interface so TypeScript uses the interface signature (which
+    // includes the optional options param) rather than the concrete class
+    // signature (which omits it for simplicity since it's always a no-op).
+    const dir = new MemoryIndexDirectory() as IndexDirectory;
     await expect(dir.writeJson('f.json', {}, { atomic: true })).resolves.toBeUndefined();
   });
 });
