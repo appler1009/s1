@@ -4,19 +4,22 @@ import type {
   IndexConfig,
   SegmentMeta,
   PostingsList,
+  Posting,
   QueryAST,
+  PhraseQuery,
   SearchResult,
   SearchOptions,
 } from './types.js';
 import type { Scorer } from './scorer.js';
-import { wildcardToRegex } from './scorer.js';
+import { wildcardToRegex, binarySearchPosting } from './scorer.js';
 import { createAnalyzer } from './analyzer.js';
 import { LuceneQueryParser } from './query-parser.js';
 
 export class IndexSearcher {
   private readonly parser = new LuceneQueryParser();
-  private readonly termDictCache: LRUCache<string, Record<string, string>>;
-  private readonly postingsCache:  LRUCache<string, PostingsList>;
+  private readonly termDictCache:    LRUCache<string, Record<string, string>>;
+  private readonly postingsCache:    LRUCache<string, PostingsList>;
+  private readonly fieldLenCache:    LRUCache<string, Record<string, Record<string, number>>>;
 
   constructor(
     private readonly directory: IndexDirectory,
@@ -27,8 +30,10 @@ export class IndexSearcher {
       postingsCacheSize?: number;
     },
   ) {
-    this.termDictCache = new LRUCache({ max: options?.termDictCacheSize ?? 200 });
+    this.termDictCache  = new LRUCache({ max: options?.termDictCacheSize ?? 200 });
     this.postingsCache  = new LRUCache({ max: options?.postingsCacheSize ?? 10_000 });
+    // One entry per segment; field-lengths.json is ~docCount × fields × 4 bytes
+    this.fieldLenCache  = new LRUCache({ max: 50 });
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -37,21 +42,31 @@ export class IndexSearcher {
     const topK   = options?.topK ?? 10;
     const filter = options?.filter;
 
+    const queryAST = this.parser.parse(queryStr);
+
+    // Fail fast on unimplemented range queries
+    if (containsRangeQuery(queryAST)) {
+      throw new Error(
+        'Range queries ([min TO max]) are not yet implemented. ' +
+        'Use the filter option for numeric/date range filtering: ' +
+        '{ filter: doc => Number(doc.year) >= 2020 }',
+      );
+    }
+
     const segments = await this.loadSegments();
     if (segments.length === 0) return [];
-
-    const queryAST = this.parser.parse(queryStr);
 
     const perSegment = await Promise.all(
       segments.map(meta => this.searchSegment(meta, queryAST)),
     );
 
-    return kWayMerge(perSegment, topK, filter);
+    return selectTopK(perSegment.flat().filter(r => !filter || filter(r.doc)), topK);
   }
 
   invalidateCache(): void {
     this.termDictCache.clear();
     this.postingsCache.clear();
+    this.fieldLenCache.clear();
   }
 
   // ─── Segment search ───────────────────────────────────────────────────────
@@ -61,19 +76,17 @@ export class IndexSearcher {
     queryAST: QueryAST,
   ): Promise<SearchResult[]> {
     const segId = segMeta.segmentId;
-
-    const [docs, deletedIds] = await Promise.all([
-      this.directory.readJson<Record<string, Record<string, unknown>>>(`${segId}/docs.json`),
-      this.loadDeletedSet(segId),
-    ]);
-
-    // Indexed fields for this segment — used to expand unfielded query terms
     const indexedFields = Object.keys(segMeta.fields);
 
-    // Build postingsMap: load entries for all concrete query terms
+    const [docs, deletedIds, allFieldLengths] = await Promise.all([
+      this.directory.readJson<Record<string, Record<string, unknown>>>(`${segId}/docs.json`),
+      this.loadDeletedSet(segId),
+      this.loadFieldLengths(segId),
+    ]);
+
+    // Build postingsMap for all concrete query terms
     const postingsMap = new Map<string, PostingsList>();
-    const terms = extractTerms(queryAST, indexedFields, this.config);
-    for (const { field, term } of terms) {
+    for (const { field, term } of extractTerms(queryAST, indexedFields, this.config)) {
       const key = `${field}:${term}`;
       if (!postingsMap.has(key)) {
         const pl = await this.loadPostings(segId, key);
@@ -81,10 +94,10 @@ export class IndexSearcher {
       }
     }
 
-    // Expand wildcards against the term-dict
+    // Expand wildcards against full term-dict
     await this.expandWildcards(queryAST, segId, postingsMap);
 
-    // mustNot doc IDs to exclude
+    // mustNot exclusion set
     const mustNotIds = await this.collectMustNotDocIds(queryAST, segId, indexedFields);
 
     // Candidate docIds from all matched postings
@@ -104,14 +117,17 @@ export class IndexSearcher {
       const docStringId = String(stored['id'] ?? docId);
       if (deletedIds.has(docStringId)) continue;
 
-      if (!this.mustClausesSatisfied(queryAST, docId, postingsMap)) continue;
+      // Structural match check (phrase position, must clauses)
+      if (!this.queryMatches(queryAST, docId, postingsMap)) continue;
 
+      const fieldLengths = allFieldLengths[String(docId)] ?? {};
       const score = this.scorer.score({
         query: queryAST,
         docId,
         segmentMeta: segMeta,
         postingsMap,
         config: this.config,
+        fieldLengths,
       });
 
       if (score > 0) {
@@ -122,15 +138,29 @@ export class IndexSearcher {
     return results;
   }
 
-  // ─── Must / mustNot ───────────────────────────────────────────────────────
+  // ─── Query structural matching ────────────────────────────────────────────
 
-  private mustClausesSatisfied(
+  /**
+   * Check that a document satisfies structural constraints:
+   * - Phrase queries: terms must appear at consecutive positions (within slop)
+   * - Bool queries: all must-clauses satisfied
+   * Term/wildcard/range: no structural constraint beyond existence (score > 0 gates them)
+   */
+  private queryMatches(query: QueryAST, docId: number, pm: Map<string, PostingsList>): boolean {
+    switch (query.type) {
+      case 'phrase': return checkPhraseMatch(query, docId, pm);
+      case 'bool':   return this.boolMustSatisfied(query, docId, pm);
+      default:       return true;
+    }
+  }
+
+  private boolMustSatisfied(
     query: QueryAST,
     docId: number,
-    postingsMap: Map<string, PostingsList>,
+    pm: Map<string, PostingsList>,
   ): boolean {
     if (query.type !== 'bool' || !query.must?.length) return true;
-    return query.must.every(c => this.clauseMatches(c, docId, postingsMap));
+    return query.must.every(c => this.clauseMatches(c, docId, pm));
   }
 
   private clauseMatches(
@@ -141,30 +171,34 @@ export class IndexSearcher {
     switch (node.type) {
       case 'term': {
         if (node.field) {
-          return pm.get(`${node.field}:${node.term}`)?.postings.some(p => p.docId === docId) ?? false;
+          return binarySearchPosting(
+            pm.get(`${node.field}:${node.term}`)?.postings ?? [], docId,
+          ) !== undefined;
         }
         for (const [key, pl] of pm) {
-          if (key.endsWith(`:${node.term}`) && pl.postings.some(p => p.docId === docId)) return true;
+          if (key.endsWith(`:${node.term}`) && binarySearchPosting(pl.postings, docId)) return true;
         }
         return false;
       }
-      case 'phrase': {
-        return node.terms.every(t => {
-          if (node.field) {
-            return pm.get(`${node.field}:${t}`)?.postings.some(p => p.docId === docId) ?? false;
-          }
-          for (const [key, pl] of pm) {
-            if (key.endsWith(`:${t}`) && pl.postings.some(p => p.docId === docId)) return true;
-          }
-          return false;
-        });
+      case 'phrase':
+        return checkPhraseMatch(node, docId, pm);
+      case 'wildcard': {
+        const regex = wildcardToRegex(node.pattern);
+        for (const [key, pl] of pm) {
+          const colonIdx = key.indexOf(':');
+          if (node.field && key.slice(0, colonIdx) !== node.field) continue;
+          if (regex.test(key.slice(colonIdx + 1)) && binarySearchPosting(pl.postings, docId)) return true;
+        }
+        return false;
       }
       case 'bool':
-        return this.mustClausesSatisfied(node, docId, pm);
+        return this.boolMustSatisfied(node, docId, pm);
       default:
         return true;
     }
   }
+
+  // ─── mustNot ─────────────────────────────────────────────────────────────
 
   private async collectMustNotDocIds(
     query: QueryAST,
@@ -199,11 +233,8 @@ export class IndexSearcher {
       const regex = wildcardToRegex(pattern);
       for (const fieldTerm of Object.keys(termDict)) {
         const colonIdx = fieldTerm.indexOf(':');
-        const dictField = fieldTerm.slice(0, colonIdx);
-        const dictTerm  = fieldTerm.slice(colonIdx + 1);
-
-        if (field && dictField !== field) continue;
-        if (!regex.test(dictTerm)) continue;
+        if (field && fieldTerm.slice(0, colonIdx) !== field) continue;
+        if (!regex.test(fieldTerm.slice(colonIdx + 1))) continue;
         if (!postingsMap.has(fieldTerm)) {
           const pl = await this.loadPostings(segId, fieldTerm);
           if (pl) postingsMap.set(fieldTerm, pl);
@@ -250,6 +281,23 @@ export class IndexSearcher {
     }
   }
 
+  private async loadFieldLengths(
+    segId: string,
+  ): Promise<Record<string, Record<string, number>>> {
+    const key = segId;
+    const cached = this.fieldLenCache.get(key);
+    if (cached) return cached;
+    try {
+      const data = await this.directory.readJson<Record<string, Record<string, number>>>(
+        `${segId}/field-lengths.json`,
+      );
+      this.fieldLenCache.set(key, data);
+      return data;
+    } catch {
+      return {};
+    }
+  }
+
   private async loadDeletedSet(segId: string): Promise<Set<string>> {
     try {
       const ids = await this.directory.readJson<string[]>(`${segId}/deleted.json`);
@@ -260,12 +308,60 @@ export class IndexSearcher {
   }
 }
 
+// ─── Phrase position checking ─────────────────────────────────────────────────
+
+function checkPhraseMatch(
+  node: PhraseQuery,
+  docId: number,
+  pm: Map<string, PostingsList>,
+): boolean {
+  if (node.terms.length === 0) return true;
+  const slop = node.slop ?? 0;
+
+  if (node.field) {
+    return checkPhrasePositions(node.terms, node.field, docId, pm, slop);
+  }
+
+  // Unfielded: try each distinct field present in postingsMap
+  const fields = new Set<string>();
+  for (const key of pm.keys()) fields.add(key.slice(0, key.indexOf(':')));
+  for (const field of fields) {
+    if (checkPhrasePositions(node.terms, field, docId, pm, slop)) return true;
+  }
+  return false;
+}
+
+function checkPhrasePositions(
+  terms: string[],
+  field: string,
+  docId: number,
+  pm: Map<string, PostingsList>,
+  slop: number,
+): boolean {
+  // Collect position arrays for each term; bail if any term is missing
+  const posArrays: number[][] = [];
+  for (const t of terms) {
+    const pl = pm.get(`${field}:${t}`);
+    if (!pl) return false;
+    const posting = binarySearchPosting(pl.postings, docId);
+    if (!posting) return false;
+    posArrays.push(posting.pos);
+  }
+
+  // For each candidate start position of term[0], verify subsequent terms
+  // appear at expected offsets (position[i] ≈ startPos + i, within slop)
+  outer: for (const startPos of posArrays[0]!) {
+    for (let i = 1; i < terms.length; i++) {
+      const expected = startPos + i;
+      if (!posArrays[i]!.some(p => Math.abs(p - expected) <= slop)) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
 // ─── Query helpers ────────────────────────────────────────────────────────────
 
-/**
- * Extract concrete (field, term) pairs from a query AST.
- * Unfielded terms are expanded to all indexed fields in this segment.
- */
 function extractTerms(
   node: QueryAST,
   indexedFields: string[],
@@ -278,8 +374,7 @@ function extractTerms(
       case 'term': {
         const fields = n.field ? [n.field] : indexedFields;
         for (const field of fields) {
-          const analyzerName = config.analyzers?.[field] ?? 'standard';
-          const tokens = createAnalyzer(analyzerName).analyze(field, n.term);
+          const tokens = createAnalyzer(config.analyzers?.[field] ?? 'standard').analyze(field, n.term);
           if (tokens.length > 0) {
             for (const t of tokens) out.push({ field, term: t.term });
           } else {
@@ -320,19 +415,45 @@ function collectWildcards(node: QueryAST): Array<{ field?: string; pattern: stri
   return out;
 }
 
-// ─── k-way merge ─────────────────────────────────────────────────────────────
+function containsRangeQuery(node: QueryAST): boolean {
+  if (node.type === 'range') return true;
+  if (node.type === 'bool') {
+    const all = [...(node.must ?? []), ...(node.should ?? []), ...(node.mustNot ?? [])];
+    return all.some(containsRangeQuery);
+  }
+  return false;
+}
 
-function kWayMerge(
-  perSegment: SearchResult[][],
-  topK: number,
-  filter?: (doc: Record<string, unknown>) => boolean,
-): SearchResult[] {
-  const flat: SearchResult[] = [];
-  for (const seg of perSegment) {
-    for (const r of seg) {
-      if (!filter || filter(r.doc)) flat.push(r);
+// ─── Top-K selection (min-heap, O(n log k)) ───────────────────────────────────
+
+function selectTopK(items: SearchResult[], k: number): SearchResult[] {
+  if (items.length <= k) {
+    return items.sort((a, b) => b.score - a.score);
+  }
+
+  // Build a min-heap of size k: the smallest score is always at index 0
+  const heap = items.slice(0, k);
+  for (let i = Math.floor(k / 2) - 1; i >= 0; i--) heapSiftDown(heap, i);
+
+  for (let i = k; i < items.length; i++) {
+    if (items[i]!.score > heap[0]!.score) {
+      heap[0] = items[i]!;
+      heapSiftDown(heap, 0);
     }
   }
-  flat.sort((a, b) => b.score - a.score);
-  return flat.slice(0, topK);
+
+  return heap.sort((a, b) => b.score - a.score);
+}
+
+function heapSiftDown(heap: SearchResult[], i: number): void {
+  const n = heap.length;
+  while (true) {
+    let smallest = i;
+    const l = 2 * i + 1, r = 2 * i + 2;
+    if (l < n && heap[l]!.score < heap[smallest]!.score) smallest = l;
+    if (r < n && heap[r]!.score < heap[smallest]!.score) smallest = r;
+    if (smallest === i) break;
+    [heap[i], heap[smallest]] = [heap[smallest]!, heap[i]!];
+    i = smallest;
+  }
 }
