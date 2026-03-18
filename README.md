@@ -183,9 +183,9 @@ Many small segments slow searches. Use `SegmentMerger` to consolidate:
 ```ts
 import { SegmentMerger } from 'lucene-ts';
 
-const merger = new SegmentMerger(dir, config, {
-  maxSegments: 10,  // trigger when segment count exceeds this
-  mergeCount:  4,   // merge this many of the smallest segments at once
+const merger = new SegmentMerger(dir, {
+  maxSegments: 10,  // trigger when segment count exceeds this (default 10)
+  mergeCount:  4,   // merge this many of the smallest segments at once (default 4)
 });
 
 await merger.maybeMerge();  // no-op if under threshold (good for a background cron)
@@ -194,7 +194,11 @@ await merger.mergeAll();    // unconditionally consolidate everything into one s
 
 After a merge, call `searcher.invalidateCache()` so stale term-dict entries are evicted.
 
-> **Merge limitation:** Fields in `noStore` (e.g. `body`) are not stored in `docs.json`, so they cannot be re-indexed during a merge. If you need to merge-and-reindex body text, store the full document in an external store (S3, database) keyed by `id`, and re-fetch it at merge time.
+Merging is **structural** — postings lists are combined directly without re-tokenising or re-analysing any text. This means:
+
+- `noStore` fields (e.g. `body`) remain fully searchable after a merge; their postings are carried over verbatim from the source segments.
+- Phrase query positions are preserved exactly as indexed.
+- No `IndexConfig` is required by `SegmentMerger`; the analyzer is never invoked.
 
 ## Scoring
 
