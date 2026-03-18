@@ -42,9 +42,9 @@ const results = await searcher.search('typescript search');
 |---|---|
 | `hello` | Term in any indexed field |
 | `title:hello` | Term in a specific field |
-| `"quick brown fox"` | Exact phrase (position-checked) |
+| `"quick brown fox"` | Exact phrase (position-checked; stop words create position gaps) |
 | `title:"quick brown"` | Fielded phrase |
-| `"quick brown"~2` | Phrase with slop (terms within 2 positions) |
+| `"quick brown"~2` | Phrase with slop: each term may be up to 2 positions away from its expected position |
 | `hel*` | Wildcard (suffix/prefix/contains) |
 | `title:hel*` | Fielded wildcard |
 | `+typescript +search` | Both terms required (AND) |
@@ -55,6 +55,10 @@ const results = await searcher.search('typescript search');
 | `title:hello^2.5` | Boost a term's score |
 | `(typescript OR javascript) +search` | Grouped expression |
 
+> **Phrase stop words:** The query analyzer mirrors the index analyzer. Stop words in a phrase (`"the quick brown"`) are filtered but their position slots are preserved, so `"the quick brown"` matches a document where "the" was at position 1, "quick" at 2, and "brown" at 3.
+>
+> **Boolean semantics:** When a query has no `+`/`AND`/`must` clauses, at least one `should` clause must structurally match (phrase position constraints apply). When `must` clauses are present, `should` clauses only add to the score.
+>
 > **Note:** Range queries (`[min TO max]`) are parsed but not yet implemented. Use the `filter` option instead: `{ filter: doc => Number(doc.year) >= 2020 }`.
 
 ## Backends
@@ -123,12 +127,12 @@ const { writer } = createIndex(dir, config, {
 });
 
 await writer.addDocument({ id: 'doc-1', title: 'Hello', body: '...' });
-await writer.deleteById('doc-1');  // tombstone; applied on next commit
+await writer.deleteById('doc-1');  // tombstone visible across ALL segments, not just the current one
 
 const info = await writer.commit();
 // → { segmentId: 'seg-000001', docCount: 1, deletedCount: 0 }
 
-await writer.close();  // commits any remaining buffered docs
+await writer.close();  // commits any remaining buffered docs; further use throws
 ```
 
 Each `commit()` produces a new segment directory:
@@ -140,7 +144,7 @@ index/
 │   ├── segment-meta.json      ← docCount, per-field avgLength, timestamp
 │   ├── docs.json              ← stored fields keyed by numeric docId
 │   ├── field-lengths.json     ← per-doc token counts for BM25 |d| normalisation
-│   ├── term-dict.json         ← "field:term" → "postings/field__term.json"
+│   ├── term-dict.json         ← "field:term" → "postings/field__term.json" (term part hex-escaped)
 │   ├── deleted.json           ← tombstoned string doc IDs
 │   └── postings/
 │       ├── title__hello.json  ← { df, postings: [{docId, tf, pos}] }
