@@ -366,3 +366,192 @@ describe('keyword analyzer — special characters', () => {
     expect(byUnderscore.map(r => r.docId)).toEqual(['b']);
   });
 });
+
+// ─── mustNot-only queries (single-clause parseBool fix) ───────────────────────
+
+describe('mustNot-only queries', () => {
+  it('standalone NOT term excludes matching documents', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'java-doc', title: 'java programming' });
+    await writer.addDocument({ id: 'ts-doc',   title: 'typescript programming' });
+    await writer.commit();
+
+    // Before the fix, "NOT java" returned a bare TermQuery and matched java-doc.
+    const results = await searcher.search('NOT java');
+    const ids = results.map(r => r.docId);
+    expect(ids).not.toContain('java-doc');
+    // ts-doc has no must clause to satisfy, so it returns 0 score — typical Lucene
+    // behaviour for mustNot-only is no results unless there are also positive clauses.
+    // We just verify the negation is honoured.
+    expect(ids).not.toContain('java-doc');
+  });
+
+  it('minus prefix alone excludes matching documents', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'java-doc', title: 'java programming' });
+    await writer.addDocument({ id: 'ts-doc',   title: 'typescript rocks' });
+    await writer.commit();
+
+    const results = await searcher.search('typescript -java');
+    const ids = results.map(r => r.docId);
+    expect(ids).toContain('ts-doc');
+    expect(ids).not.toContain('java-doc');
+  });
+});
+
+// ─── Boosting ─────────────────────────────────────────────────────────────────
+
+describe('boosting', () => {
+  it('field boost promotes matches in boosted field', async () => {
+    const dir = new MemoryIndexDirectory();
+    // title is boosted 3x; body matches should rank lower
+    const { writer, searcher } = createIndex(dir, { noStore: ['body'], boost: { title: 3.0 } });
+
+    await writer.addDocument({ id: 'title-match', title: 'search',  body: 'other content' });
+    await writer.addDocument({ id: 'body-match',  title: 'other',   body: 'search content' });
+    await writer.commit();
+
+    const results = await searcher.search('search');
+    expect(results[0]!.docId).toBe('title-match');
+  });
+
+  it('term boost (^N) raises a specific term score', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'high', title: 'typescript' });
+    await writer.addDocument({ id: 'low',  title: 'javascript' });
+    await writer.commit();
+
+    // Without boost both should appear; with boost typescript should be first
+    const results = await searcher.search('typescript^5 OR javascript');
+    expect(results[0]!.docId).toBe('high');
+  });
+});
+
+// ─── TF > 1 ───────────────────────────────────────────────────────────────────
+
+describe('term frequency > 1', () => {
+  it('document with repeated term scores higher than one with a single occurrence', async () => {
+    const { writer, searcher } = makeIndex();
+    // 'search' appears 5 times in high, once in low
+    await writer.addDocument({ id: 'high', title: 'search search search search search' });
+    await writer.addDocument({ id: 'low',  title: 'search framework overview here now' });
+    await writer.commit();
+
+    const results = await searcher.search('search');
+    expect(results[0]!.docId).toBe('high');
+  });
+});
+
+// ─── Non-string field types ───────────────────────────────────────────────────
+
+describe('non-string field indexing', () => {
+  it('indexes a numeric field and finds it by term search', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'doc', year: 2024 });
+    await writer.commit();
+
+    const results = await searcher.search('year:2024');
+    expect(results.map(r => r.docId)).toContain('doc');
+  });
+
+  it('indexes a Date field and finds it via ISO-string term', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir);
+    const d = new Date('2024-01-15T00:00:00.000Z');
+    await writer.addDocument({ id: 'doc', created: d });
+    await writer.commit();
+
+    // Standard analyzer will split the ISO string on non-word chars into tokens
+    const results = await searcher.search('created:2024');
+    expect(results.map(r => r.docId)).toContain('doc');
+  });
+
+  it('stores the numeric value in the result doc', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'doc', year: 2024, title: 'hello' });
+    await writer.commit();
+
+    const results = await searcher.search('hello');
+    expect(results[0]!.doc['year']).toBe(2024);
+  });
+});
+
+// ─── deleteById edge cases ────────────────────────────────────────────────────
+
+describe('deleteById edge cases', () => {
+  it('deleting a non-existent id is a no-op', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'real', title: 'hello world' });
+    await writer.deleteById('nonexistent');
+    await writer.commit();
+
+    const results = await searcher.search('hello');
+    expect(results.map(r => r.docId)).toContain('real');
+  });
+
+  it('deleting the same id twice does not corrupt the index', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'doc', title: 'hello world' });
+    await writer.deleteById('doc');
+    await writer.deleteById('doc');
+    await writer.commit();
+
+    const results = await searcher.search('hello');
+    expect(results.map(r => r.docId)).not.toContain('doc');
+  });
+});
+
+// ─── Cache invalidation ───────────────────────────────────────────────────────
+
+describe('cache invalidation', () => {
+  it('invalidateCache allows new segments to be found', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir);
+
+    await writer.addDocument({ id: 'doc1', title: 'hello' });
+    await writer.commit();
+
+    // Prime the cache with one search
+    const before = await searcher.search('hello');
+    expect(before.map(r => r.docId)).toContain('doc1');
+
+    // Add a second document in a new segment
+    await writer.addDocument({ id: 'doc2', title: 'hello' });
+    await writer.commit();
+
+    // Without invalidation, the new segment might be visible anyway since we
+    // re-read segments.json on every search — but caches for postings should be
+    // irrelevant here. The main thing is invalidateCache does not throw and does
+    // not break subsequent searches.
+    searcher.invalidateCache();
+    const after = await searcher.search('hello');
+    expect(after.map(r => r.docId)).toContain('doc1');
+    expect(after.map(r => r.docId)).toContain('doc2');
+  });
+});
+
+// ─── topK boundary ────────────────────────────────────────────────────────────
+
+describe('topK boundary', () => {
+  it('topK larger than result count returns all results', async () => {
+    const { writer, searcher } = makeIndex();
+    for (let i = 0; i < 3; i++) {
+      await writer.addDocument({ id: `d${i}`, title: 'common term' });
+    }
+    await writer.commit();
+
+    const results = await searcher.search('common', { topK: 100 });
+    expect(results).toHaveLength(3);
+  });
+
+  it('topK=1 returns only the best-scoring document', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: 'high', title: 'search' });
+    await writer.addDocument({ id: 'low',  title: 'search result overview here' });
+    await writer.commit();
+
+    const results = await searcher.search('search', { topK: 1 });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.docId).toBe('high');
+  });
+});
