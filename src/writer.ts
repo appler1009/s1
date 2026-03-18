@@ -6,14 +6,14 @@ export class IndexWriter {
   private nextDocId = 0;
   private segmentCounter = 0;
 
-  private stagingDocs     = new Map<number, Record<string, unknown>>();
-  private stagingPostings = new Map<string, Posting[]>();              // "field:term" → postings
+  private stagingDocs        = new Map<number, Record<string, unknown>>();
+  // fieldTerm → docId → Posting: O(1) lookup during indexing
+  private stagingPostings    = new Map<string, Map<number, Posting>>();
   private stagingFieldLengths = new Map<number, Map<string, number>>(); // docId → field → tokenCount
-  private pendingDeletes  = new Set<string>();
+  private pendingDeletes     = new Set<string>();
 
-  // Derived from config for fast lookup
-  private readonly noStore:  Set<string>;
-  private readonly noIndex:  Set<string>;
+  private readonly noStore: Set<string>;
+  private readonly noIndex: Set<string>;
 
   constructor(
     private readonly directory: IndexDirectory,
@@ -44,8 +44,8 @@ export class IndexWriter {
           value instanceof Date      ? value.toISOString() :
           JSON.stringify(value);
 
-        const analyzerName = this.config.analyzers?.[fieldName] ?? 'standard';
-        const tokens = createAnalyzer(analyzerName).analyze(fieldName, raw);
+        const tokens = createAnalyzer(this.config.analyzers?.[fieldName] ?? 'standard')
+          .analyze(fieldName, raw);
 
         if (tokens.length > 0) {
           if (!this.stagingFieldLengths.has(docId)) {
@@ -55,22 +55,21 @@ export class IndexWriter {
 
           for (const token of tokens) {
             const key = `${fieldName}:${token.term}`;
-            let list = this.stagingPostings.get(key);
-            if (!list) { list = []; this.stagingPostings.set(key, list); }
+            let docMap = this.stagingPostings.get(key);
+            if (!docMap) { docMap = new Map(); this.stagingPostings.set(key, docMap); }
 
-            const existing = list.find(p => p.docId === docId);
+            const existing = docMap.get(docId);
             if (existing) {
               existing.tf++;
               existing.pos.push(token.position);
             } else {
-              list.push({ docId, tf: 1, pos: [token.position] });
+              docMap.set(docId, { docId, tf: 1, pos: [token.position] });
             }
           }
         }
       }
     }
 
-    // 'id' is always stored so tombstoning works
     storedFields['id'] = inputDoc['id'] ?? `doc-${docId}`;
     this.stagingDocs.set(docId, storedFields);
 
@@ -93,7 +92,14 @@ export class IndexWriter {
     // 1. Stored docs
     await this.directory.writeJson(`${segmentId}/docs.json`, Object.fromEntries(this.stagingDocs));
 
-    // 2. Field stats (only indexed fields appear here)
+    // 2. Per-doc field lengths (for accurate BM25 |d| normalisation)
+    const fieldLengthsOut: Record<string, Record<string, number>> = {};
+    for (const [docId, fieldMap] of this.stagingFieldLengths) {
+      fieldLengthsOut[String(docId)] = Object.fromEntries(fieldMap);
+    }
+    await this.directory.writeJson(`${segmentId}/field-lengths.json`, fieldLengthsOut);
+
+    // 3. Field stats (avgLength per field, used for BM25 avgdl)
     const fieldTotalLen = new Map<string, number>();
     const fieldDocCount = new Map<string, number>();
     for (const [, fieldMap] of this.stagingFieldLengths) {
@@ -108,17 +114,18 @@ export class IndexWriter {
       fieldStats[field] = { docCount: count, avgLength: total / count };
     }
 
-    // 3. Per-term postings + term-dict
+    // 4. Per-term postings (flatten Map<docId,Posting> → sorted array) + term-dict
     const termDict: Record<string, string> = {};
-    for (const [fieldTerm, postings] of this.stagingPostings) {
-      postings.sort((a, b) => a.docId - b.docId);
+    for (const [fieldTerm, docMap] of this.stagingPostings) {
+      const postings = Array.from(docMap.values()).sort((a, b) => a.docId - b.docId);
       const filename = `postings/${sanitize(fieldTerm)}.json`;
-      await this.directory.writeJson(`${segmentId}/${filename}`, { df: postings.length, postings } satisfies PostingsList);
+      await this.directory.writeJson(`${segmentId}/${filename}`,
+        { df: postings.length, postings } satisfies PostingsList);
       termDict[fieldTerm] = filename;
     }
     await this.directory.writeJson(`${segmentId}/term-dict.json`, termDict);
 
-    // 4. Segment metadata
+    // 5. Segment metadata
     const meta: SegmentMeta = {
       segmentId,
       docCount: this.stagingDocs.size,
@@ -127,18 +134,18 @@ export class IndexWriter {
     };
     await this.directory.writeJson(`${segmentId}/segment-meta.json`, meta);
 
-    // 5. Tombstones
+    // 6. Tombstones
     const deletedCount = this.pendingDeletes.size;
     if (deletedCount > 0) {
       await this.directory.writeJson(`${segmentId}/deleted.json`, [...this.pendingDeletes]);
     }
 
-    // 6. Manifest
+    // 7. Manifest
     const segments = await readSegmentsList(this.directory);
     segments.push(segmentId);
     await this.directory.writeJson('segments.json', { segments }, { atomic: true });
 
-    // 7. Clear buffers
+    // 8. Clear buffers
     this.stagingDocs.clear();
     this.stagingPostings.clear();
     this.stagingFieldLengths.clear();
@@ -165,6 +172,14 @@ async function readSegmentsList(dir: IndexDirectory): Promise<string[]> {
   }
 }
 
+/**
+ * Convert "field:term" to a safe filename.
+ * Encodes field and term separately, joined by "__", so "title:hello-world"
+ * and "title:hello_world" produce different filenames and cannot collide.
+ */
 function sanitize(fieldTerm: string): string {
-  return fieldTerm.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+  const sep = fieldTerm.indexOf(':');
+  const field = fieldTerm.slice(0, sep).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+  const term  = fieldTerm.slice(sep + 1).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+  return `${field}__${term}`;
 }

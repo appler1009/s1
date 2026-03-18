@@ -9,8 +9,10 @@ export interface Scorer {
  *
  * score(q, d) = Σ IDF(t) × [ tf(t,d) × (k+1) ] / [ tf(t,d) + k × (1 - b + b × |d|/avgdl) ]
  *
- * k  = TF saturation (default 1.2)
- * b  = field-length normalisation (default 0.75)
+ * |d|   = actual token count for the field in this document (from field-lengths.json)
+ * avgdl = average |d| across all documents in the segment (from segment-meta.json)
+ * k     = TF saturation (default 1.2)
+ * b     = field-length normalisation (default 0.75)
  */
 export class BM25Scorer implements Scorer {
   constructor(
@@ -19,24 +21,26 @@ export class BM25Scorer implements Scorer {
   ) {}
 
   score(ctx: ScoreContext): number {
-    const { query, docId, segmentMeta, postingsMap, config } = ctx;
+    const { query, docId, segmentMeta, postingsMap, config, fieldLengths } = ctx;
     let total = 0;
 
     const scoreTerm = (field: string, term: string, boost: number): void => {
       const pl = postingsMap.get(`${field}:${term}`);
       if (!pl) return;
 
-      const posting = binarySearch(pl.postings, docId);
+      const posting = binarySearchPosting(pl.postings, docId);
       if (!posting) return;
 
-      const tf = posting.tf;
-      const N = segmentMeta.docCount;
+      const tf     = posting.tf;
+      const N      = segmentMeta.docCount;
       const avgLen = segmentMeta.fields[field]?.avgLength ?? 1;
+      // Use actual document field length; fall back to tf if unavailable
+      const docLen = fieldLengths[field] ?? tf;
 
       const idf = Math.max(0, Math.log((N - pl.df + 0.5) / (pl.df + 0.5) + 1));
       const tfNorm =
         (tf * (this.k + 1)) /
-        (tf + this.k * (1 - this.b + this.b * (tf / avgLen)));
+        (tf + this.k * (1 - this.b + this.b * (docLen / avgLen)));
 
       total += idf * tfNorm * (config.boost?.[field] ?? 1.0) * boost;
     };
@@ -59,7 +63,6 @@ function visitQuery(
       if (node.field) {
         fn(node.field, node.term, boost);
       } else {
-        // No field: score against every field in postingsMap that has this term
         for (const key of postingsMap.keys()) {
           const colonIdx = key.indexOf(':');
           if (key.slice(colonIdx + 1) === node.term) {
@@ -87,11 +90,11 @@ function visitQuery(
     }
     case 'wildcard': {
       const wRegex = wildcardToRegex(node.pattern);
-      const boost = node.boost ?? 1.0;
+      const boost  = node.boost ?? 1.0;
       for (const key of postingsMap.keys()) {
         const colonIdx = key.indexOf(':');
-        const kField = key.slice(0, colonIdx);
-        const kTerm  = key.slice(colonIdx + 1);
+        const kField   = key.slice(0, colonIdx);
+        const kTerm    = key.slice(colonIdx + 1);
         if (node.field && kField !== node.field) continue;
         if (wRegex.test(kTerm)) fn(kField, kTerm, boost);
       }
@@ -106,7 +109,7 @@ function visitQuery(
   }
 }
 
-function binarySearch(
+export function binarySearchPosting(
   postings: Array<{ docId: number; tf: number; pos: number[] }>,
   docId: number,
 ): { docId: number; tf: number; pos: number[] } | undefined {
@@ -121,13 +124,10 @@ function binarySearch(
   return undefined;
 }
 
-function wildcardToRegex(pattern: string): RegExp {
+export function wildcardToRegex(pattern: string): RegExp {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
     .replace(/\*/g, '.*')
     .replace(/\?/g, '.');
   return new RegExp(`^${escaped}$`, 'i');
 }
-
-// Re-export for use in searcher.ts
-export { wildcardToRegex };

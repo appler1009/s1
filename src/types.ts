@@ -155,4 +155,6 @@ export interface ScoreContext {
   segmentMeta: SegmentMeta;
   postingsMap: Map<string, PostingsList>;
   config: IndexConfig;
+  /** Token count per indexed field for this specific document. Used for BM25 |d|/avgdl. */
+  fieldLengths: Record<string, number>;
 }
