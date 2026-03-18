@@ -22,6 +22,7 @@
   "type": "module",
   "devDependencies": {
     "@types/bun": "latest",
+    "hyparquet": "^1.25.1",
     "typescript": "^5.9.3"
   },
   "dependencies": {
