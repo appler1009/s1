@@ -153,24 +153,38 @@ export class IndexSearcher {
   /**
    * Check that a document satisfies structural constraints:
    * - Phrase queries: terms must appear at consecutive positions (within slop)
-   * - Bool queries: all must-clauses satisfied
+   * - Bool queries:
+   *     • all must-clauses must match
+   *     • when there are no must-clauses, at least one should-clause must match
    * Term/wildcard/range: no structural constraint beyond existence (score > 0 gates them)
    */
   private queryMatches(query: QueryAST, docId: number, pm: Map<string, PostingsList>): boolean {
     switch (query.type) {
       case 'phrase': return checkPhraseMatch(query, docId, pm);
-      case 'bool':   return this.boolMustSatisfied(query, docId, pm);
+      case 'bool':   return this.boolMatchesSatisfied(query, docId, pm);
       default:       return true;
     }
   }
 
-  private boolMustSatisfied(
+  private boolMatchesSatisfied(
     query: QueryAST,
     docId: number,
     pm: Map<string, PostingsList>,
   ): boolean {
-    if (query.type !== 'bool' || !query.must?.length) return true;
-    return query.must.every(c => this.clauseMatches(c, docId, pm));
+    if (query.type !== 'bool') return true;
+
+    // All must-clauses must structurally match.
+    if (query.must?.length && !query.must.every(c => this.clauseMatches(c, docId, pm))) {
+      return false;
+    }
+
+    // When there are no must-clauses, at least one should-clause must match.
+    // (Mirrors Lucene's minimum-should-match=1 when no MUST clauses exist.)
+    if (!query.must?.length && query.should?.length) {
+      return query.should.some(c => this.clauseMatches(c, docId, pm));
+    }
+
+    return true;
   }
 
   private clauseMatches(
@@ -202,7 +216,7 @@ export class IndexSearcher {
         return false;
       }
       case 'bool':
-        return this.boolMustSatisfied(node, docId, pm);
+        return this.boolMatchesSatisfied(node, docId, pm);
       default:
         return true;
     }
