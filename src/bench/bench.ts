@@ -8,20 +8,10 @@
 
 import { MemoryIndexDirectory } from '../directory.js';
 import { createIndex } from '../index.js';
-import type { Schema } from '../types.js';
 
 const N_DOCS    = parseInt(process.env['DOCS']    ?? '10000',  10);
 const N_QUERIES = parseInt(process.env['QUERIES'] ?? '100',    10);
 const TOP_K     = parseInt(process.env['TOPK']    ?? '10',     10);
-
-const SCHEMA: Schema = {
-  fields: {
-    id:      { type: 'keyword', store: true,  indexed: true  },
-    title:   { type: 'text',    store: true,  indexed: true,  boost: 2.0 },
-    body:    { type: 'text',    store: false, indexed: true  },
-    tags:    { type: 'keyword', store: true,  indexed: true,  analyzer: 'keyword' },
-  },
-};
 
 const WORDS = [
   'search', 'engine', 'index', 'query', 'document', 'segment', 'lucene',
@@ -45,7 +35,11 @@ async function main(): Promise<void> {
   console.log(`  docs=${N_DOCS}  queries=${N_QUERIES}  topK=${TOP_K}\n`);
 
   const dir = new MemoryIndexDirectory();
-  const { writer, searcher } = createIndex(dir, SCHEMA, { commitThreshold: 2_500 });
+  const { writer, searcher } = createIndex(dir, {
+    analyzers: { id: 'keyword', tags: 'keyword' },
+    noStore:   ['body'],
+    boost:     { title: 2.0 },
+  }, { commitThreshold: 2_500 });
 
   // ── Indexing ──────────────────────────────────────────────────────────────
   const t0 = Date.now();

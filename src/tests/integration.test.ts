@@ -1,22 +1,18 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 import { MemoryIndexDirectory } from '../directory.js';
 import { createIndex } from '../index.js';
-import type { Schema } from '../types.js';
-
-const schema: Schema = {
-  fields: {
-    id:      { type: 'keyword', store: true,  indexed: true  },
-    title:   { type: 'text',    store: true,  indexed: true,  boost: 2.0 },
-    body:    { type: 'text',    store: false, indexed: true  },
-    snippet: { type: 'text',    store: true,  indexed: false },
-    tags:    { type: 'keyword', store: true,  indexed: true,  analyzer: 'keyword' },
-    url:     { type: 'keyword', store: true,  indexed: false },
-  },
-};
 
 function makeIndex() {
   const dir = new MemoryIndexDirectory();
-  return { dir, ...createIndex(dir, schema) };
+  return {
+    dir,
+    ...createIndex(dir, {
+      analyzers: { id: 'keyword', tags: 'keyword' },
+      noStore:   ['body'],
+      noIndex:   ['url', 'snippet'],
+      boost:     { title: 2.0 },
+    }),
+  };
 }
 
 // ─── Basic write + read ───────────────────────────────────────────────────────
@@ -32,15 +28,15 @@ describe('single-segment basic search', () => {
     expect(results[0]!.docId).toBe('doc-1');
   });
 
-  it('returns stored fields', async () => {
+  it('returns stored fields, omits noStore fields', async () => {
     const { writer, searcher } = makeIndex();
     await writer.addDocument({ id: 'a', title: 'TypeScript rocks', url: 'https://example.com', body: 'lang' });
     await writer.commit();
 
     const [r] = await searcher.search('typescript');
     expect(r!.doc['title']).toBe('TypeScript rocks');
-    expect(r!.doc['url']).toBe('https://example.com');
-    expect(r!.doc['body']).toBeUndefined(); // body is not stored
+    expect(r!.doc['url']).toBe('https://example.com');   // stored via noIndex
+    expect(r!.doc['body']).toBeUndefined();               // noStore: indexed only
   });
 
   it('returns empty when no match', async () => {
@@ -48,20 +44,49 @@ describe('single-segment basic search', () => {
     await writer.addDocument({ id: 'a', title: 'Hello World' });
     await writer.commit();
 
-    const results = await searcher.search('nonexistent');
-    expect(results).toHaveLength(0);
+    expect(await searcher.search('nonexistent')).toHaveLength(0);
   });
 
   it('scores more relevant documents higher', async () => {
     const { writer, searcher } = makeIndex();
-    // 'search' appears in both title (boosted) and body
     await writer.addDocument({ id: 'high', title: 'search engine design', body: 'about search' });
-    // 'search' appears only in body
     await writer.addDocument({ id: 'low',  title: 'introduction to databases', body: 'full-text search' });
     await writer.commit();
 
     const results = await searcher.search('search');
     expect(results[0]!.docId).toBe('high');
+  });
+});
+
+// ─── noStore / noIndex ────────────────────────────────────────────────────────
+
+describe('noStore and noIndex behaviour', () => {
+  it('noStore field is searchable but absent from results', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir, { noStore: ['body'] });
+
+    await writer.addDocument({ id: '1', body: 'searchable content' });
+    await writer.commit();
+
+    const results = await searcher.search('searchable');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.doc['body']).toBeUndefined();
+  });
+
+  it('noIndex field is stored but not searchable', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir, { noIndex: ['url'] });
+
+    await writer.addDocument({ id: '1', title: 'hello', url: 'https://example.com' });
+    await writer.commit();
+
+    // searching on url term should find nothing (not indexed)
+    const byUrl = await searcher.search('url:example');
+    expect(byUrl).toHaveLength(0);
+
+    // but the url value appears in the stored doc
+    const byTitle = await searcher.search('hello');
+    expect(byTitle[0]!.doc['url']).toBe('https://example.com');
   });
 });
 
@@ -150,12 +175,10 @@ describe('multi-segment search', () => {
   it('merges results across segments correctly', async () => {
     const { writer, searcher } = makeIndex();
 
-    // Segment 1
     await writer.addDocument({ id: 'seg1-doc1', title: 'alpha beta' });
     await writer.addDocument({ id: 'seg1-doc2', title: 'gamma delta' });
     await writer.commit();
 
-    // Segment 2
     await writer.addDocument({ id: 'seg2-doc1', title: 'alpha gamma' });
     await writer.commit();
 
@@ -174,8 +197,7 @@ describe('multi-segment search', () => {
       await writer.commit();
     }
 
-    const results = await searcher.search('common', { topK: 3 });
-    expect(results).toHaveLength(3);
+    expect(await searcher.search('common', { topK: 3 })).toHaveLength(3);
   });
 });
 
@@ -189,8 +211,7 @@ describe('topK and filter options', () => {
     }
     await writer.commit();
 
-    const results = await searcher.search('common', { topK: 3 });
-    expect(results).toHaveLength(3);
+    expect(await searcher.search('common', { topK: 3 })).toHaveLength(3);
   });
 
   it('applies filter function', async () => {
@@ -212,7 +233,7 @@ describe('topK and filter options', () => {
 describe('auto-commit on threshold', () => {
   it('creates multiple segments when threshold is exceeded', async () => {
     const dir = new MemoryIndexDirectory();
-    const { writer, searcher } = createIndex(dir, schema, { commitThreshold: 3 });
+    const { writer, searcher } = createIndex(dir, {}, { commitThreshold: 3 });
 
     for (let i = 0; i < 7; i++) {
       await writer.addDocument({ id: `d${i}`, title: `document ${i}` });
@@ -220,7 +241,6 @@ describe('auto-commit on threshold', () => {
     await writer.close();
 
     const manifest = await dir.readJson<{ segments: string[] }>('segments.json');
-    // 7 docs / 3 threshold = 2 auto commits + 1 final = at least 2 segments
     expect(manifest.segments.length).toBeGreaterThanOrEqual(2);
 
     const results = await searcher.search('document');

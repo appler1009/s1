@@ -1,7 +1,5 @@
 export type {
-  Schema,
-  FieldConfig,
-  FieldType,
+  IndexConfig,
   Token,
   Posting,
   PostingsList,
@@ -38,47 +36,51 @@ export type { MergePolicy } from './merge.js';
 
 // ─── Convenience factory ──────────────────────────────────────────────────────
 
-import type { Schema } from './types.js';
+import type { IndexConfig } from './types.js';
 import type { IndexDirectory } from './directory.js';
-import { StandardAnalyzer } from './analyzer.js';
 import { BM25Scorer } from './scorer.js';
 import { IndexWriter } from './writer.js';
 import { IndexSearcher } from './searcher.js';
 
 export interface IndexOptions {
-  /** Automatically flush a new segment every N documents (default 5000). */
   commitThreshold?: number;
-  /** LRU cache size for postings lists (default 10_000 entries). */
   postingsCacheSize?: number;
 }
 
 /**
- * Create a writer/searcher pair that share the same directory + schema.
+ * Create a writer/searcher pair sharing the same directory and config.
  *
  * @example
  * ```ts
  * const dir = new MemoryIndexDirectory();
- * const schema: Schema = { fields: { title: { type: 'text', store: true, indexed: true } } };
- * const { writer, searcher } = createIndex(dir, schema);
+ * const { writer, searcher } = createIndex(dir);
  *
- * await writer.addDocument({ title: 'Hello world' });
+ * await writer.addDocument({ id: '1', title: 'Hello world', body: 'long text...' });
  * await writer.commit();
  *
  * const results = await searcher.search('hello');
  * ```
+ *
+ * @example With config overrides
+ * ```ts
+ * const { writer, searcher } = createIndex(dir, {
+ *   analyzers: { id: 'keyword', tags: 'keyword' },
+ *   noStore:   ['body'],
+ *   noIndex:   ['url', 'thumbnail'],
+ *   boost:     { title: 2.0 },
+ * });
+ * ```
  */
 export function createIndex(
   directory: IndexDirectory,
-  schema: Schema,
+  config: IndexConfig = {},
   options?: IndexOptions,
 ): { writer: IndexWriter; searcher: IndexSearcher } {
-  const analyzer = new StandardAnalyzer();
   const scorer = new BM25Scorer();
-
-  const writer = new IndexWriter(directory, schema, analyzer, options?.commitThreshold);
-  const searcher = new IndexSearcher(directory, schema, analyzer, scorer, {
-    postingsCacheSize: options?.postingsCacheSize,
-  });
-
-  return { writer, searcher };
+  return {
+    writer:   new IndexWriter(directory, config, options?.commitThreshold),
+    searcher: new IndexSearcher(directory, config, scorer, {
+      postingsCacheSize: options?.postingsCacheSize,
+    }),
+  };
 }

@@ -1,21 +1,38 @@
-// ─── Field & Schema ──────────────────────────────────────────────────────────
+// ─── Index configuration ──────────────────────────────────────────────────────
 
-export type FieldType = 'text' | 'keyword' | 'numeric' | 'date';
+/**
+ * Optional per-index configuration. All fields are indexed + stored with the
+ * standard analyzer by default; use these lists and maps to override.
+ */
+export interface IndexConfig {
+  /**
+   * Override the analyzer for specific fields.
+   * Any field not listed uses 'standard'.
+   * Built-in values: 'standard' | 'keyword'. Custom analyzers can be
+   * registered via createAnalyzer.
+   *
+   * @example { analyzers: { id: 'keyword', tags: 'keyword' } }
+   */
+  analyzers?: Record<string, string>;
 
-export interface FieldConfig {
-  type: FieldType;
-  /** Include this field in stored docs.json? */
-  store: boolean;
-  /** Analyzer name to use when indexing ('standard' | 'keyword'). Defaults to 'standard'. */
-  analyzer?: 'standard' | 'keyword';
-  /** Add to inverted index? */
-  indexed: boolean;
-  /** BM25 score multiplier applied to matches in this field. */
-  boost?: number;
-}
+  /**
+   * Fields to index for search but NOT write to stored docs.json.
+   * Use for large text (e.g. body) you want to search but not return.
+   */
+  noStore?: string[];
 
-export interface Schema {
-  fields: Record<string, FieldConfig>;
+  /**
+   * Fields to store in docs.json but NOT add to the inverted index.
+   * Use for carry-through metadata (e.g. url, thumbnail) you want in
+   * results but don't need to search.
+   */
+  noIndex?: string[];
+
+  /**
+   * Per-field BM25 score multipliers applied at query time.
+   * @example { boost: { title: 2.0 } }
+   */
+  boost?: Record<string, number>;
 }
 
 // ─── Tokenization ────────────────────────────────────────────────────────────
@@ -56,6 +73,7 @@ export interface SegmentMeta {
   segmentId: string;
   docCount: number;
   createdAt: string; // ISO 8601
+  /** Keyed by field name; only fields that were actually indexed appear here. */
   fields: Record<string, FieldStats>;
 }
 
@@ -136,5 +154,5 @@ export interface ScoreContext {
   docId: number;
   segmentMeta: SegmentMeta;
   postingsMap: Map<string, PostingsList>;
-  schema: Schema;
+  config: IndexConfig;
 }
