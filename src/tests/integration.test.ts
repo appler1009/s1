@@ -109,13 +109,44 @@ describe('phrase queries', () => {
     const { writer, searcher } = makeIndex();
     await writer.addDocument({ id: '1', title: 'quick brown fox' });
     await writer.addDocument({ id: '2', title: 'quick very brown fox' }); // 1 word gap
+    await writer.addDocument({ id: '3', title: 'quick slow safe brown fox' }); // 2 word gap
     await writer.commit();
 
-    // slop:1 should match both
-    const results = await searcher.search('"quick brown"~1');
+    const slop1 = await searcher.search('"quick brown"~1');
+    const ids1 = slop1.map(r => r.docId);
+    expect(ids1).toContain('1');
+    expect(ids1).toContain('2');
+    expect(ids1).not.toContain('3'); // gap=2 exceeds slop=1
+
+    // slop=0 requires adjacency
+    const slop0 = await searcher.search('"quick brown"');
+    const ids0 = slop0.map(r => r.docId);
+    expect(ids0).toContain('1');
+    expect(ids0).not.toContain('2');
+  });
+
+  it('phrase in should clause enforces position order', async () => {
+    const { writer, searcher } = makeIndex();
+    await writer.addDocument({ id: '1', title: 'quick brown fox' });
+    await writer.addDocument({ id: '2', title: 'quick fox brown' }); // wrong order
+    await writer.commit();
+
+    // "quick brown" is a should clause here; it must still position-check
+    const results = await searcher.search('"quick brown" OR "lazy dog"');
     const ids = results.map(r => r.docId);
     expect(ids).toContain('1');
-    expect(ids).toContain('2');
+    expect(ids).not.toContain('2');
+  });
+
+  it('stop word in phrase does not prevent matching', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir);
+    await writer.addDocument({ id: '1', title: 'the quick brown fox' });
+    await writer.commit();
+
+    // "the" is a stop word; phrase should match with correct position gaps
+    const results = await searcher.search('"the quick brown"');
+    expect(results.map(r => r.docId)).toContain('1');
   });
 });
 
@@ -181,12 +212,28 @@ describe('boolean queries', () => {
 // ─── Deletions ────────────────────────────────────────────────────────────────
 
 describe('deletions (tombstones)', () => {
-  it('excludes deleted documents from results', async () => {
+  it('excludes deleted documents from results (same segment)', async () => {
     const { writer, searcher } = makeIndex();
     await writer.addDocument({ id: 'keep', title: 'hello world' });
     await writer.addDocument({ id: 'gone', title: 'hello world' });
     await writer.deleteById('gone');
     await writer.commit();
+
+    const results = await searcher.search('hello');
+    const ids = results.map(r => r.docId);
+    expect(ids).toContain('keep');
+    expect(ids).not.toContain('gone');
+  });
+
+  it('cross-segment deletion: tombstone in later segment excludes doc in earlier segment', async () => {
+    const { writer, searcher } = makeIndex();
+
+    await writer.addDocument({ id: 'keep', title: 'hello world' });
+    await writer.addDocument({ id: 'gone', title: 'hello world' });
+    await writer.commit(); // seg 1: both docs
+
+    await writer.deleteById('gone');
+    await writer.commit(); // seg 2: tombstone only
 
     const results = await searcher.search('hello');
     const ids = results.map(r => r.docId);
@@ -271,5 +318,51 @@ describe('auto-commit on threshold', () => {
 
     const results = await searcher.search('document');
     expect(results.length).toBeGreaterThanOrEqual(7);
+  });
+});
+
+// ─── Writer lifecycle guards ───────────────────────────────────────────────────
+
+describe('writer lifecycle', () => {
+  it('throws on addDocument after close()', async () => {
+    const { writer } = makeIndex();
+    await writer.addDocument({ id: '1', title: 'hello' });
+    await writer.close();
+    await expect(writer.addDocument({ id: '2', title: 'world' }))
+      .rejects.toThrow('IndexWriter has been closed');
+  });
+
+  it('throws on commit() after close()', async () => {
+    const { writer } = makeIndex();
+    await writer.close();
+    await expect(writer.commit()).rejects.toThrow('IndexWriter has been closed');
+  });
+
+  it('second close() is a no-op', async () => {
+    const { writer } = makeIndex();
+    await writer.addDocument({ id: '1', title: 'hello' });
+    await writer.close();
+    await expect(writer.close()).resolves.toBeUndefined();
+  });
+});
+
+// ─── Keyword analyzer term collision ─────────────────────────────────────────
+
+describe('keyword analyzer — special characters', () => {
+  it('distinguishes terms that differ only by special characters', async () => {
+    const dir = new MemoryIndexDirectory();
+    const { writer, searcher } = createIndex(dir, { analyzers: { code: 'keyword' } });
+
+    // Use '.' and '_' — both are non-query-operator chars that previously
+    // both sanitized to '_', causing a filename collision and broken postings.
+    await writer.addDocument({ id: 'a', code: 'v1.0' });
+    await writer.addDocument({ id: 'b', code: 'v1_0' });
+    await writer.commit();
+
+    const byDot        = await searcher.search('code:v1.0');
+    const byUnderscore = await searcher.search('code:v1_0');
+
+    expect(byDot.map(r => r.docId)).toEqual(['a']);
+    expect(byUnderscore.map(r => r.docId)).toEqual(['b']);
   });
 });
