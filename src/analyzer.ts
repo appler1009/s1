@@ -23,7 +23,7 @@ const STOP_WORDS = new Set([
  * - Lowercases
  * - Splits on non-word characters
  * - Filters stop words
- * - Drops pure-numeric tokens ≤ 1 char (single digits)
+ * - Drops any single-character token
  */
 export class StandardAnalyzer implements Analyzer {
   analyze(_field: string, value: string): Token[] {

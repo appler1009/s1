@@ -1,5 +1,7 @@
 import type { QueryAST, BoolQuery, TermQuery, PhraseQuery, RangeQuery, WildcardQuery } from './types.js';
 
+const SPECIAL_CHARS = new Set([' ', '\t', '\n', ':', '"', '(', ')', '[', ']', '^', '+', '-']);
+
 /**
  * Hand-written recursive-descent parser for a Lucene-inspired query syntax.
  *
@@ -115,7 +117,6 @@ export class LuceneQueryParser {
 
   private parseGroup(): QueryAST {
     this.pos++; // consume '('
-    const savedPos = this.pos;
     const inner = this.parseBool();
     this.skipWs();
     if (this.ch() === ')') this.pos++;
@@ -124,8 +125,6 @@ export class LuceneQueryParser {
     if (boost !== undefined) {
       return { ...inner, boost };
     }
-    // Restore if nothing consumed from boost
-    void savedPos;
     return inner;
   }
 
@@ -246,9 +245,8 @@ export class LuceneQueryParser {
 
   /** Read a contiguous non-whitespace, non-special token. */
   private readToken(): string {
-    const special = new Set([' ', '\t', '\n', ':', '"', '(', ')', '[', ']', '^', '+', '-']);
     let buf = '';
-    while (!this.eof() && !special.has(this.input[this.pos]!)) {
+    while (!this.eof() && !SPECIAL_CHARS.has(this.input[this.pos]!)) {
       buf += this.input[this.pos];
       this.pos++;
     }
