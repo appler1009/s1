@@ -4,7 +4,6 @@ import { createAnalyzer } from './analyzer.js';
 
 export class IndexWriter {
   private nextDocId = 0;
-  private segmentCounter = 0;
 
   private stagingDocs        = new Map<number, Record<string, unknown>>();
   // fieldTerm → docId → Posting: O(1) lookup during indexing
@@ -87,7 +86,14 @@ export class IndexWriter {
       return { segmentId: '', docCount: 0, deletedCount: 0 };
     }
 
-    const segmentId = `seg-${String(++this.segmentCounter).padStart(6, '0')}`;
+    // Derive next segment ID from the manifest so multiple writer instances
+    // on the same directory never generate colliding IDs.
+    const existingSegments = await readSegmentsList(this.directory);
+    const maxN = existingSegments.reduce((max, id) => {
+      const m = /seg-(\d+)$/.exec(id);
+      return m ? Math.max(max, parseInt(m[1]!, 10)) : max;
+    }, 0);
+    const segmentId = `seg-${String(maxN + 1).padStart(6, '0')}`;
 
     // 1. Stored docs
     await this.directory.writeJson(`${segmentId}/docs.json`, Object.fromEntries(this.stagingDocs));
@@ -141,9 +147,8 @@ export class IndexWriter {
     }
 
     // 7. Manifest
-    const segments = await readSegmentsList(this.directory);
-    segments.push(segmentId);
-    await this.directory.writeJson('segments.json', { segments }, { atomic: true });
+    existingSegments.push(segmentId);
+    await this.directory.writeJson('segments.json', { segments: existingSegments }, { atomic: true });
 
     // 8. Clear buffers
     this.stagingDocs.clear();
